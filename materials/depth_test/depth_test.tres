@@ -1,0 +1,21 @@
+[gd_resource type="SpatialMaterial" load_steps=5 format=2]
+[ext_resource path="depth_test_normal.png" type="Texture" id=3]
+[ext_resource path="depth_test_depth.png" type="Texture" id=4]
+[resource]
+albedo_color = Color(1, 1, 1, 1)
+metallic = 0
+roughness = 1
+normal_enabled = true
+normal_scale = 1
+normal_texture = ExtResource( 3 )
+depth_enabled = true
+depth_scale = 0.2
+depth_deep_parallax = true
+depth_min_layers = 8
+depth_max_layers = 32
+depth_flip_tangent = false
+depth_flip_binormal = false
+depth_texture = ExtResource( 4 )
+
+
+

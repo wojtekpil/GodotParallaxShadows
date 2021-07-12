@@ -1,0 +1,251 @@
+[gd_scene load_steps=12 format=2]
+
+[ext_resource path="res://materials/rocky_floor/rocky_floor_depth.png" type="Texture" id=1]
+[ext_resource path="res://materials/rocky_floor/rocky_floor_albedo.png" type="Texture" id=2]
+[ext_resource path="res://scripts/ShadowsParallax.gd" type="Script" id=3]
+[ext_resource path="res://materials/rocky_floor/rocky_floor_orm.png" type="Texture" id=4]
+[ext_resource path="res://materials/rocky_floor/rocky_floor_normal.png" type="Texture" id=5]
+[ext_resource path="res://materials/paralax_shadows.tres" type="Material" id=7]
+
+[sub_resource type="PlaneMesh" id=1]
+size = Vector2( 10, 10 )
+
+[sub_resource type="Shader" id=2]
+code = "shader_type spatial;
+render_mode blend_mix,depth_draw_opaque,cull_back,diffuse_lambert,specular_schlick_ggx;
+uniform vec4 albedo : hint_color;
+uniform sampler2D texture_albedo : hint_albedo;
+uniform float specular;
+uniform float metallic;
+uniform float roughness : hint_range(0,1);
+uniform float point_size : hint_range(0,128);
+uniform sampler2D texture_roughness : hint_white;
+uniform vec4 roughness_texture_channel;
+uniform sampler2D texture_normal : hint_normal;
+uniform float normal_scale : hint_range(-16,16);
+uniform sampler2D texture_ambient_occlusion : hint_white;
+uniform vec4 ao_texture_channel;
+uniform float ao_light_affect;
+uniform sampler2D texture_depth : hint_black;
+uniform float depth_scale;
+uniform int depth_min_layers;
+uniform int depth_max_layers;
+uniform vec2 depth_flip;
+uniform vec3 uv1_scale;
+uniform vec3 uv1_offset;
+//you need to use gdscript for this...
+//mat.set_shader_param(\"light_vector\", sun_light_node.transform.basis.xform(Vector3(0,0,1)))
+uniform vec3 light_vector;
+
+uniform bool enable_shadows = true;
+uniform bool enable_soft_shadows = true;
+uniform float shadow_intensity: hint_range(1,64,1) = 4.0;
+
+void vertex() {
+	UV=UV*uv1_scale.xy+uv1_offset.xy;
+}
+
+
+//names probably should be changed to depth
+float parallaxSoftShadowMultiplier(in vec3 lightDir, in vec2 initialTexCoords, in float initialHeight, in float VdotN)
+{
+	float shadowMultiplier = 0.0;
+	const float minLayers = 15.0;
+	const float maxLayers = 30.0;
+
+	// calculate lighting only for surface oriented to the light source
+	if ( lightDir.z >= 0.0 )
+		return 1.0;
+
+	// calculate initial parameters
+	float numSamplesUnderSurface = 0.0;
+	shadowMultiplier = 0.0;
+	float numLayers = mix(maxLayers, minLayers, abs(dot(vec3(0.0, 0.0, 1.0), lightDir)));
+	//start from layer initialHeight
+	float layerHeight = initialHeight / numLayers;
+	vec2 texStep = depth_scale * lightDir.xy / VdotN / numLayers;
+
+	// current parameters
+	float currentLayerHeight = initialHeight - layerHeight;
+	vec2 currentTexCoords = initialTexCoords + texStep;
+	float depthFromTexture = texture(texture_depth, currentTexCoords).r;
+	int stepIndex = 1;
+	
+	// while point is below depth 0.0
+	while(currentLayerHeight > 0.0)
+	{ 
+		// if point is under the surface
+		if(depthFromTexture < currentLayerHeight)
+		{
+			// calculate partial shadowing factor
+			numSamplesUnderSurface += 1.0;
+			float newShadowMultiplier = (currentLayerHeight - depthFromTexture) * (1.0 - float(stepIndex) / numLayers);
+			shadowMultiplier = max(shadowMultiplier, newShadowMultiplier);
+		}
+		// offset to the next layer
+		stepIndex += 1;
+		currentLayerHeight -= layerHeight;
+		currentTexCoords -= texStep;
+		depthFromTexture = texture(texture_depth, currentTexCoords).r;
+	}
+
+	// Shadowing factor should be 0 if there were no points under the surface
+	if(numSamplesUnderSurface < 1.0)
+		shadowMultiplier = 0.0; 
+
+
+	return pow(1.0-shadowMultiplier, shadow_intensity);
+}
+
+float parallaxShadowMultiplier(vec2 texCoord, vec3 lightDir, float VdotN)
+{
+	if ( lightDir.z >= 0.0 )
+		return 1.0;
+
+	float minLayers = 0.0;
+	float maxLayers = 32.0;
+	float numLayers = mix(maxLayers, minLayers, abs(dot(vec3(0.0, 0.0, 1.0), lightDir)));
+	
+
+
+	vec2 currentTexCoords = texCoord;
+	float currentDepthMapValue = texture(texture_depth, currentTexCoords).r;
+	float currentLayerDepth = currentDepthMapValue;
+
+	float layerDepth = 1.0 / numLayers;
+	vec2 P = lightDir.xy* depth_scale / VdotN;
+	vec2 deltaTexCoords = P / numLayers;
+
+	while (currentLayerDepth <= currentDepthMapValue && currentLayerDepth > 0.0)
+	{
+		currentTexCoords -= deltaTexCoords;
+		currentDepthMapValue = texture(texture_depth, currentTexCoords).r;
+		currentLayerDepth -= layerDepth;
+	}
+
+	float r = currentLayerDepth > currentDepthMapValue ? 0.0 : 1.0;
+	return r;
+}
+
+void fragment() {
+	mat3 TBN_mat = mat3(TANGENT*depth_flip.x,-BINORMAL*depth_flip.y,NORMAL);
+	vec2 base_uv = UV;
+	{
+		
+		vec3 view_dir = normalize(normalize(-VERTEX)*TBN_mat);
+		float num_layers = mix(float(depth_max_layers),float(depth_min_layers), abs(dot(vec3(0.0, 0.0, 1.0), view_dir)));
+		float layer_depth = 1.0 / num_layers;
+		float current_layer_depth = 0.0;
+		vec2 P = view_dir.xy * depth_scale / dot(VIEW,NORMAL);
+		vec2 delta = P / num_layers;
+		vec2  ofs = base_uv;
+		float depth = textureLod(texture_depth, ofs,0.0).r;
+		float current_depth = 0.0;
+		while(current_depth < depth) {
+			ofs -= delta;
+			depth = textureLod(texture_depth, ofs,0.0).r;
+			current_depth += layer_depth;
+		}
+		vec2 prev_ofs = ofs + delta;
+		float after_depth  = depth - current_depth;
+		float before_depth = textureLod(texture_depth, prev_ofs, 0.0).r - current_depth + layer_depth;
+		float weight = after_depth / (after_depth - before_depth);
+		ofs = mix(ofs,prev_ofs,weight);
+		base_uv=ofs;
+	}
+	
+	vec3 light = (INV_CAMERA_MATRIX * normalize(vec4(-light_vector,0))).xyz;
+	vec3 light_tang = normalize(light*TBN_mat);
+	
+	float shadow = 0.0;
+	if (enable_soft_shadows)
+		shadow = parallaxSoftShadowMultiplier(light_tang, base_uv, texture(texture_depth,  base_uv).r, dot(VIEW,NORMAL));
+	else
+		shadow = parallaxShadowMultiplier(base_uv, light_tang, dot(VIEW,NORMAL));
+	
+	vec4 albedo_tex = texture(texture_albedo,base_uv);
+	if (enable_shadows)
+		ALBEDO = albedo.rgb * albedo_tex.rgb *  shadow;
+	else
+		ALBEDO = albedo.rgb * albedo_tex.rgb;
+
+	METALLIC = metallic;
+	float roughness_tex = dot(texture(texture_roughness,base_uv),roughness_texture_channel);
+	ROUGHNESS = roughness_tex * roughness;
+	SPECULAR = specular;
+	NORMALMAP = texture(texture_normal,base_uv).rgb;
+	NORMALMAP_DEPTH = normal_scale;
+	AO = dot(texture(texture_ambient_occlusion,base_uv),ao_texture_channel);
+	AO_LIGHT_AFFECT = ao_light_affect;
+}
+"
+
+[sub_resource type="ShaderMaterial" id=3]
+shader = SubResource( 2 )
+shader_param/albedo = Color( 1, 1, 1, 1 )
+shader_param/specular = 0.5
+shader_param/metallic = 0.0
+shader_param/roughness = 1.0
+shader_param/point_size = 1.0
+shader_param/roughness_texture_channel = Plane( 0, 1, 0, 0 )
+shader_param/normal_scale = 1.0
+shader_param/ao_texture_channel = Plane( 1, 0, 0, 0 )
+shader_param/ao_light_affect = 1.0
+shader_param/depth_scale = 0.05
+shader_param/depth_min_layers = 8
+shader_param/depth_max_layers = 64
+shader_param/depth_flip = Vector2( 1, 1 )
+shader_param/uv1_scale = Vector3( 1, 1, 1 )
+shader_param/uv1_offset = Vector3( 0, 0, 0 )
+shader_param/light_vector = Vector3( 0.639707, 0.487409, 0.594312 )
+shader_param/enable_shadows = true
+shader_param/enable_soft_shadows = false
+shader_param/shadow_intensity = 16.0
+shader_param/texture_albedo = ExtResource( 2 )
+shader_param/texture_roughness = ExtResource( 4 )
+shader_param/texture_normal = ExtResource( 5 )
+shader_param/texture_ambient_occlusion = ExtResource( 4 )
+shader_param/texture_depth = ExtResource( 1 )
+
+[sub_resource type="ProceduralSky" id=4]
+
+[sub_resource type="Environment" id=5]
+background_mode = 1
+background_sky = SubResource( 4 )
+background_color = Color( 0.937255, 0.937255, 0.937255, 1 )
+background_energy = 2.0
+tonemap_mode = 3
+
+[node name="Spatial" type="Spatial"]
+
+[node name="MeshInstance" type="MeshInstance" parent="."]
+transform = Transform( 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -5 )
+material_override = ExtResource( 7 )
+mesh = SubResource( 1 )
+material/0 = null
+script = ExtResource( 3 )
+__meta__ = {
+"apply_volumetrics": false
+}
+sun_light = NodePath("../DirectionalLight")
+
+[node name="MeshInstance2" type="MeshInstance" parent="."]
+transform = Transform( 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 5 )
+material_override = SubResource( 3 )
+mesh = SubResource( 1 )
+material/0 = null
+script = ExtResource( 3 )
+__meta__ = {
+"apply_volumetrics": false
+}
+sun_light = NodePath("../DirectionalLight")
+
+[node name="DirectionalLight" type="DirectionalLight" parent="."]
+transform = Transform( -0.506195, 0.578395, 0.639707, -0.314699, -0.814492, 0.487409, 0.802951, 0.0454084, 0.594312, 0.12916, 4.32244, 0.323567 )
+light_energy = 1.5
+__meta__ = {
+"volumetric": 1.0
+}
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource( 5 )
